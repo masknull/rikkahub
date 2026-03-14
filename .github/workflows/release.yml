@@ -74,27 +74,7 @@ jobs:
         run: |
           set -euo pipefail
           cat > app/google-services.json <<'EOF'
-          {
-            "project_info": {
-              "project_number": "0",
-              "project_id": "placeholder",
-              "storage_bucket": "placeholder.appspot.com"
-            },
-            "client": [
-              {
-                "client_info": {
-                  "mobilesdk_app_id": "1:0:android:0000000000000000",
-                  "android_client_info": {
-                    "package_name": "me.rerere.rikkahub"
-                  }
-                },
-                "api_key": [
-                  { "current_key": "placeholder" }
-                ]
-              }
-            ],
-            "configuration_version": "1"
-          }
+          {"project_info":{"project_number":"0","project_id":"placeholder"},"client":[{"client_info":{"mobilesdk_app_id":"1:0:android:0000000000000000","android_client_info":{"package_name":"me.rerere.rikkahub"}},"api_key":[{"current_key":"placeholder"}]}],"configuration_version":"1"}
           EOF
 
       - name: Gradle Build (release, arm64-v8a only)
