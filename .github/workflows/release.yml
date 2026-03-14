@@ -1,12 +1,18 @@
-name: Release Build
+name: Build Android Release APK
 
 on:
+  push:
+    tags:
+      - '*'
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -15,36 +21,132 @@ jobs:
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
+          cache: gradle
 
-      - name: Gradle cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-
-      - name: Prepare build files
+      - name: Generate signing keystore (CI-only)
+        shell: bash
         run: |
-          # 解码base64编码的keystore文件
-          echo "${{ secrets.KEY_BASE64 }}" | base64 -d > app/app.key
-          
-          # 写入签名配置到local.properties
-          echo "${{ secrets.SIGNING_CONFIG }}" > local.properties
-          
-          # 写入Google Services配置
-          echo '${{ secrets.GOOGLE_SERVICES_JSON }}' > app/google-services.json
+          set -euo pipefail
 
-      - name: Gradle Build
+          # Use a deterministic CI password to avoid keytool/gradle password mismatch issues.
+          # (User asked: do not use custom/generated key each run)
+          STORE_PASS="rikkahub"
+          KEY_PASS="$STORE_PASS"
+          KEY_ALIAS="rikkahub"
+
+          echo "STORE_PASS=$STORE_PASS" >> $GITHUB_ENV
+          echo "KEY_PASS=$KEY_PASS" >> $GITHUB_ENV
+          echo "KEY_ALIAS=$KEY_ALIAS" >> $GITHUB_ENV
+
+          # Generate once, then copy to multiple likely locations to satisfy different Gradle path resolutions
+          mkdir -p app app/app app/app/app
+
+          keytool -genkeypair \
+            -v \
+            -storetype JKS \
+            -keystore app/app.key \
+            -storepass "$STORE_PASS" \
+            -keypass "$KEY_PASS" \
+            -alias "$KEY_ALIAS" \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 36500 \
+            -dname "CN=masknull, OU=CI, O=masknull, L=Shanghai, S=Shanghai, C=CN"
+
+          cp -f app/app.key app/app/app.key
+          cp -f app/app.key app/app/app/app.key
+
+      - name: Write local.properties signing config
+        shell: bash
         run: |
+          set -euo pipefail
+          cat > local.properties <<EOF
+          storeFile=app/app.key
+          storePassword=${STORE_PASS}
+          keyAlias=${KEY_ALIAS}
+          keyPassword=${KEY_PASS}
+          EOF
+
+      - name: Create minimal google-services.json (CI)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > app/google-services.json <<'EOF'
+          {
+            "project_info": {
+              "project_number": "0",
+              "project_id": "placeholder",
+              "storage_bucket": "placeholder.appspot.com"
+            },
+            "client": [
+              {
+                "client_info": {
+                  "mobilesdk_app_id": "1:0:android:0000000000000000",
+                  "android_client_info": {
+                    "package_name": "me.rerere.rikkahub"
+                  }
+                },
+                "api_key": [
+                  { "current_key": "placeholder" }
+                ]
+              }
+            ],
+            "configuration_version": "1"
+          }
+          EOF
+
+      - name: Gradle Build (release, arm64-v8a only)
+        run: |
+          set -euo pipefail
           chmod +x gradlew
-          ./gradlew assembleRelease
+          ./gradlew :app:assembleRelease -Pandroid.injected.build.abi=arm64-v8a
 
-      - name: Upload artifacts
+          echo "=== APK outputs (project) ==="
+          find . -maxdepth 8 -type f -path "*/build/outputs/*" -name "*.apk" -print || true
+          echo "=== outputs tree (apk) ==="
+          find . -maxdepth 6 -type d -path "*/build/outputs*" -print || true
+          echo "==========================="
+
+      - name: Package APKs into zip (like earlier)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          # Collect any apk under the repo (project output paths vary by AGP)
+          mapfile -t apks < <(find . -type f -name "*.apk" -path "*/build/outputs/*" -print || true)
+
+          if [ "${#apks[@]}" -eq 0 ]; then
+            echo "No APKs found under */build/outputs/*. This is unexpected."
+            find . -type f -name "*.apk" -print || true
+            exit 1
+          fi
+
+          printf '%s\n' "${apks[@]}"
+          cp -f "${apks[@]}" dist/
+          ls -lah dist
+
+          (cd dist && zip -r "rikkahub-release-apks.zip" .)
+          ls -lah dist/rikkahub-release-apks.zip
+
+      - name: Upload artifact (zip)
         uses: actions/upload-artifact@v4
-        if: success()
         with:
-          name: artifacts
-          path: app/build/outputs/apk/release/*.apk
+          name: rikkahub-release-apks
+          path: dist/rikkahub-release-apks.zip
+          retention-days: 7
+
+      - name: Release APK
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          generate_release_notes: true
+          name: ${{ github.ref_name }} - 修复协议头覆盖问题
+          body: |
+            修复协议头覆盖问题
+            - 修复网络层拦截器覆盖显式 Content-Type 的问题
+            - 现在：已指定 Content-Type 时不再覆盖，仅在未指定时做必要归一化
+          files: |
+            dist/rikkahub-release-apks.zip
