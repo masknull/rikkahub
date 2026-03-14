@@ -96,7 +96,7 @@ jobs:
           mkdir -p dist
 
           # Collect any apk under the repo (project output paths vary by AGP)
-          mapfile -t apks < <(find . -type f -name "*.apk" ( -path "*/build/outputs/*" -o -path "*/build/intermediates/*" ) -print || true)
+          mapfile -t apks < <(find . -type f -name "*.apk" \( -path "*/build/outputs/*" -o -path "*/build/intermediates/*" \) -print || true)
 
           if [ "${#apks[@]}" -eq 0 ]; then
             echo "No APKs found under build outputs/intermediates. This is unexpected."
