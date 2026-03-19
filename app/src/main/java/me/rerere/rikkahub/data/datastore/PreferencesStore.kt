@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.provider.Model
@@ -29,12 +30,14 @@ import me.rerere.rikkahub.data.ai.prompts.DEFAULT_TRANSLATION_PROMPT
 import me.rerere.rikkahub.data.ai.prompts.LEARNING_MODE_PROMPT
 import me.rerere.rikkahub.data.datastore.migration.PreferenceStoreV1Migration
 import me.rerere.rikkahub.data.datastore.migration.PreferenceStoreV2Migration
+import me.rerere.rikkahub.data.datastore.migration.PreferenceStoreV3Migration
 import me.rerere.rikkahub.data.model.Assistant
 import me.rerere.rikkahub.data.model.Avatar
 import me.rerere.rikkahub.data.model.InjectionPosition
-import me.rerere.rikkahub.data.model.PromptInjection
-import me.rerere.rikkahub.data.model.Tag
 import me.rerere.rikkahub.data.model.Lorebook
+import me.rerere.rikkahub.data.model.PromptInjection
+import me.rerere.rikkahub.data.model.QuickMessage
+import me.rerere.rikkahub.data.model.Tag
 import me.rerere.rikkahub.data.sync.s3.S3Config
 import me.rerere.rikkahub.ui.theme.PresetThemes
 import me.rerere.rikkahub.utils.JsonInstant
@@ -53,7 +56,8 @@ private val Context.settingsStore by preferencesDataStore(
     produceMigrations = { context ->
         listOf(
             PreferenceStoreV1Migration(),
-            PreferenceStoreV2Migration()
+            PreferenceStoreV2Migration(),
+            PreferenceStoreV3Migration()
         )
     }
 )
@@ -124,6 +128,7 @@ class SettingsStore(
         // 提示词注入
         val MODE_INJECTIONS = stringPreferencesKey("mode_injections")
         val LOREBOOKS = stringPreferencesKey("lorebooks")
+        val QUICK_MESSAGES = stringPreferencesKey("quick_messages")
 
         // 备份提醒
         val BACKUP_REMINDER_CONFIG = stringPreferencesKey("backup_reminder_config")
@@ -204,6 +209,9 @@ class SettingsStore(
                 lorebooks = preferences[LOREBOOKS]?.let {
                     JsonInstant.decodeFromString(it)
                 } ?: emptyList(),
+                quickMessages = preferences[QUICK_MESSAGES]?.let {
+                    JsonInstant.decodeFromString(it)
+                } ?: emptyList(),
                 webServerEnabled = preferences[WEB_SERVER_ENABLED] == true,
                 webServerPort = preferences[WEB_SERVER_PORT] ?: 8080,
                 webServerJwtEnabled = preferences[WEB_SERVER_JWT_ENABLED] == true,
@@ -256,6 +264,7 @@ class SettingsStore(
             val validMcpServerIds = settings.mcpServers.map { it.id }.toSet()
             val validModeInjectionIds = settings.modeInjections.map { it.id }.toSet()
             val validLorebookIds = settings.lorebooks.map { it.id }.toSet()
+            val validQuickMessageIds = settings.quickMessages.map { it.id }.toSet()
             settings.copy(
                 providers = settings.providers.distinctBy { it.id }.map { provider ->
                     when (provider) {
@@ -285,6 +294,10 @@ class SettingsStore(
                         // 过滤掉不存在的 Lorebook ID
                         lorebookIds = assistant.lorebookIds.filter { id ->
                             id in validLorebookIds
+                        }.toSet(),
+                        // 过滤掉不存在的快捷消息 ID
+                        quickMessageIds = assistant.quickMessageIds.filter { id ->
+                            id in validQuickMessageIds
                         }.toSet()
                     )
                 },
@@ -294,6 +307,7 @@ class SettingsStore(
                 },
                 modeInjections = settings.modeInjections.distinctBy { it.id },
                 lorebooks = settings.lorebooks.distinctBy { it.id },
+                quickMessages = settings.quickMessages.distinctBy { it.id },
             )
         }
         .onEach {
@@ -350,6 +364,7 @@ class SettingsStore(
             } ?: preferences.remove(SELECTED_TTS_PROVIDER)
             preferences[MODE_INJECTIONS] = JsonInstant.encodeToString(settings.modeInjections)
             preferences[LOREBOOKS] = JsonInstant.encodeToString(settings.lorebooks)
+            preferences[QUICK_MESSAGES] = JsonInstant.encodeToString(settings.quickMessages)
             preferences[WEB_SERVER_ENABLED] = settings.webServerEnabled
             preferences[WEB_SERVER_PORT] = settings.webServerPort
             preferences[WEB_SERVER_JWT_ENABLED] = settings.webServerJwtEnabled
@@ -416,7 +431,8 @@ class SettingsStore(
     suspend fun updateAssistantInjections(
         assistantId: Uuid,
         modeInjectionIds: Set<Uuid>,
-        lorebookIds: Set<Uuid>
+        lorebookIds: Set<Uuid>,
+        quickMessageIds: Set<Uuid> = emptySet(),
     ) {
         update { settings ->
             settings.copy(
@@ -424,7 +440,8 @@ class SettingsStore(
                     if (assistant.id == assistantId) {
                         assistant.copy(
                             modeInjectionIds = modeInjectionIds,
-                            lorebookIds = lorebookIds
+                            lorebookIds = lorebookIds,
+                            quickMessageIds = quickMessageIds,
                         )
                     } else {
                         assistant
@@ -471,6 +488,7 @@ data class Settings(
     val selectedTTSProviderId: Uuid = DEFAULT_SYSTEM_TTS_ID,
     val modeInjections: List<PromptInjection.ModeInjection> = DEFAULT_MODE_INJECTIONS,
     val lorebooks: List<Lorebook> = emptyList(),
+    val quickMessages: List<QuickMessage> = emptyList(),
     val webServerEnabled: Boolean = false,
     val webServerPort: Int = 8080,
     val webServerJwtEnabled: Boolean = false,
@@ -484,6 +502,16 @@ data class Settings(
         // 构造一个用于初始化的settings, 但它不能用于保存，防止使用初始值存储
         fun dummy() = Settings(init = true)
     }
+}
+
+@Serializable
+enum class ChatFontFamily {
+    @SerialName("default")
+    DEFAULT,
+    @SerialName("serif")
+    SERIF,
+    @SerialName("monospace")
+    MONOSPACE,
 }
 
 @Serializable
@@ -518,6 +546,7 @@ data class DisplaySetting(
     val enableAutoScroll: Boolean = true,
     val enableLatexRendering: Boolean = true,
     val enableBlurEffect: Boolean = false,
+    val chatFontFamily: ChatFontFamily = ChatFontFamily.DEFAULT,
 )
 
 @Serializable
@@ -573,6 +602,9 @@ fun Settings.getCurrentAssistant(): Assistant {
 fun Settings.getAssistantById(id: Uuid): Assistant? {
     return this.assistants.find { it.id == id }
 }
+
+fun Settings.getQuickMessagesOfAssistant(assistant: Assistant) =
+    quickMessages.filter { it.id in assistant.quickMessageIds }
 
 fun Settings.getSelectedTTSProvider(): TTSProviderSetting? {
     return selectedTTSProviderId?.let { id ->
